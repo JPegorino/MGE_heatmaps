@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Pairwise similarity heatmap from a FASTA alignment."""
-import argparse, os, warnings
+import argparse, os, warnings, csv
 import numpy as np
 import pandas as pd
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.colors import to_rgb
 from Bio import SeqIO
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
+
+# Clean sans-serif; prefer Arial, fall back gracefully.
+matplotlib.rcParams["font.family"] = "sans-serif"
+matplotlib.rcParams["font.sans-serif"] = [
+    "Arial", "Helvetica", "DejaVu Sans", "Liberation Sans", "sans-serif"]
 
 GAP = set("-.")
 
@@ -81,11 +87,13 @@ def resolve_labels(names, df, cols_arg):
                       else f"{vals[0]} ({', '.join(vals[1:])})")
     return labels
 
-def cell_colour(identity, low_rgb, high_rgb, alpha):
-    """Interpolate low_rgb (0% identity) -> high_rgb (100% identity)."""
-    frac = 0.0 if np.isnan(identity) else np.clip(identity / 100.0, 0, 1)
+def coverage_colour(cov, low_rgb, high_rgb):
+    """Interpolate low_rgb (0% coverage) -> high_rgb (100% coverage)."""
+    if np.isnan(cov):
+        return (*low_rgb, 1.0)
+    frac = np.clip(cov / 100.0, 0, 1)
     rgb = tuple(l + frac * (h - l) for l, h in zip(low_rgb, high_rgb))
-    return (*rgb, alpha)
+    return (*rgb, 1.0)
 
 def cluster_order(H):
     """Order indices by hierarchical clustering on the H% matrix."""
@@ -109,18 +117,44 @@ def title_from_meta(path):
             base = base[: -len(suf)]
     return base
 
+def write_pairs_csv(path, names, labels, H, G, id_thr, cov_thr):
+    """Write pairs where identity AND coverage exceed thresholds,
+    sorted by (identity + coverage) descending."""
+    n = len(names)
+    rows = []
+    for i in range(n):
+        for j in range(i + 1, n):        # unique pairs, skip diagonal
+            if np.isnan(H[i, j]) or np.isnan(G[i, j]):
+                continue
+            identity = 100 - H[i, j]
+            coverage = 100 - G[i, j]
+            if identity > id_thr and coverage > cov_thr:
+                rows.append((names[i], names[j], labels[i], labels[j],
+                             identity, coverage, identity + coverage))
+    rows.sort(key=lambda r: r[6], reverse=True)   # highest total first
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["raw_name_1", "raw_name_2", "figure_name_1",
+                    "figure_name_2", "identity_pct", "coverage_pct"])
+        for r in rows:
+            w.writerow([r[0], r[1], r[2], r[3],
+                        f"{r[4]:.2f}", f"{r[5]:.2f}"])
+    return len(rows)
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("alignment")
     ap.add_argument("metadata")
     ap.add_argument("columns", help="metadata column(s), e.g. 2 or 2,4,5")
-    ap.add_argument("-c", "--colour", default="#FFA500",
-                    help="hex for MAX identity (default orange)")
-    ap.add_argument("--low-colour", default="#000000",
-                    help="hex for MIN identity (default black)")
+    ap.add_argument("-c", "--colour", default="#a83236",
+                    help="hex for MAX coverage (default maroon)")
+    ap.add_argument("--low-colour", default="#FFFFFF",
+                    help="hex for MIN coverage (default white)")
     ap.add_argument("-o", "--output", default=None)
-    ap.add_argument("--min-alpha", type=float, default=0.0,
-                    help="floor for opacity of very gappy cells")
+    ap.add_argument("--id-threshold", type=float, default=70.0,
+                    help="min %% identity for the pairs CSV (default 70)")
+    ap.add_argument("--cov-threshold", type=float, default=70.0,
+                    help="min %% coverage for the pairs CSV (default 70)")
     args = ap.parse_args()
 
     names, seqs = read_alignment(args.alignment)
@@ -140,61 +174,51 @@ def main():
     names = [names[k] for k in order]
     labels = resolve_labels(names, df, args.columns)
 
-    # coverage = 100 - G; scale opacity to max off-diagonal coverage
-    cov = 100 - G
-    offdiag = ~np.eye(n, dtype=bool)
-    valid = offdiag & ~np.isnan(cov)
-    max_cov = np.nanmax(cov[valid]) if np.any(valid) else 100.0
-    if max_cov <= 0:
-        max_cov = 100.0
+    cov = 100 - G   # coverage matrix
 
     fig, ax = plt.subplots(figsize=(1.2 * n + 4, 1.2 * n + 1))
     for i in range(n):
         for j in range(n):
-            if np.isnan(cov[i, j]):
-                a = 1.0
-            else:
-                a = np.clip(cov[i, j] / max_cov, 0, 1)
-            a = max(a, args.min_alpha)
-            identity = np.nan if np.isnan(H[i, j]) else 100 - H[i, j]
+            colour = coverage_colour(cov[i, j], low_rgb, high_rgb)
             ax.add_patch(Rectangle((j, n - 1 - i), 1, 1,
-                                   facecolor=cell_colour(identity, low_rgb,
-                                                         high_rgb, a),
+                                   facecolor=colour,
                                    edgecolor="lightgrey", lw=0.5))
+            identity = np.nan if np.isnan(H[i, j]) else 100 - H[i, j]
+            if not np.isnan(identity):
+                ax.text(j + 0.5, n - 1 - i + 0.5, f"{round(identity)}",
+                        ha="center", va="center", color="black",
+                        fontweight="bold", fontsize=24)
     ax.set_xlim(0, n); ax.set_ylim(0, n)
     ax.set_xticks(np.arange(n) + 0.5); ax.set_yticks(np.arange(n) + 0.5)
     ax.set_xticklabels(labels, rotation=90, rotation_mode="anchor",
-                       ha="right", va="center")
-    ax.set_yticklabels(labels[::-1])
+                       ha="right", va="center", fontsize=22)
+    ax.set_yticklabels(labels[::-1], fontsize=22)
     ax.set_aspect("equal")
     for s in ax.spines.values():
         s.set_visible(False)
 
     ttl = title_from_meta(args.metadata)
-    fig.suptitle(f"Pairwise Identity between {ttl}s", fontsize=28)
+    fig.suptitle(f"Pairwise Identity between {ttl}s", fontsize=40)
 
+    # Coverage legend (white -> maroon), fixed 0-100
     grad = np.linspace(0, 1, 100)
-    # Identity legend: low->high colour, fully opaque
-    axH = fig.add_axes([0.86, 0.55, 0.03, 0.3])
-    imgH = np.array([[cell_colour(v * 100, low_rgb, high_rgb, 1.0)
+    axG = fig.add_axes([0.86, 0.35, 0.03, 0.3])
+    imgG = np.array([[coverage_colour(v * 100, low_rgb, high_rgb)
                       for v in grad]])
-    axH.imshow(imgH.transpose(1, 0, 2), origin="lower", aspect="auto",
-               extent=[0, 1, 0, 100])
-    axH.set_title("Nucleotide Identity (%)", fontsize=11)
-    axH.set_xticks([]); axH.set_yticks([0, 50, 100])
-
-    # Coverage legend: opacity gradient at max identity colour
-    axG = fig.add_axes([0.86, 0.15, 0.03, 0.3])
-    imgG = np.array([[cell_colour(100, low_rgb, high_rgb, v) for v in grad]])
     axG.imshow(imgG.transpose(1, 0, 2), origin="lower", aspect="auto",
                extent=[0, 1, 0, 100])
-    axG.set_title("Alignment Coverage (%)", fontsize=11)
+    axG.set_title("Alignment Coverage (%)", fontsize=25)
     axG.set_xticks([]); axG.set_yticks([0, 50, 100])
-    axG.set_yticklabels(["0", "50", f"{a:.2f}:100"])
+    axG.set_yticklabels([0, 50, 100], fontsize=25)
 
     out = args.output or f"{ttl}_identity_heatmap.svg"
     fig.savefig(out, format="svg", bbox_inches="tight")
     print(f"Saved {out}")
+
+    csv_out = f"{ttl}_pairs.csv"
+    n_pairs = write_pairs_csv(csv_out, names, labels, H, G,
+                              args.id_threshold, args.cov_threshold)
+    print(f"Saved {csv_out} ({n_pairs} pair(s) above thresholds)")
 
 if __name__ == "__main__":
     main()
