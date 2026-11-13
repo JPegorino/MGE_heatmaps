@@ -190,7 +190,7 @@ def main():
                extent=[0, 1, 0, 100])
     axG.set_title("Alignment Coverage (%)", fontsize=11)
     axG.set_xticks([]); axG.set_yticks([0, 50, 100])
-    axG.set_yticklabels(["0", "50", f"{max_cov:.2f}:100"])
+    axG.set_yticklabels(["0", "50", f"{a:.2f}:100"])
 
     out = args.output or f"{ttl}_identity_heatmap.svg"
     fig.savefig(out, format="svg", bbox_inches="tight")
