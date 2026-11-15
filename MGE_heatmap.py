@@ -212,6 +212,7 @@ def main():
     axG.set_yticklabels([0, 50, 100], fontsize=25)
 
     out = args.output or f"{ttl}_identity_heatmap.svg"
+    mpl.rcParams["svg.fonttype"] = "none" # before saving the figure, ensure it will ave the text labels as text that can be edited in an image editor.
     fig.savefig(out, format="svg", bbox_inches="tight")
     print(f"Saved {out}")
 
